@@ -792,13 +792,15 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
    *          The old index
    * @param newState
    *          The new index
+   * @param force
+   *          Whether to write resources despite unresolved references
    * @param monitor
    *          The progress monitor used for user feedback
    * @return a List with the list of loaded resources {@link URI} in the first position and a list of {@link URI}s of resources that could not be loaded in the
    *         second position.
    */
   @SuppressWarnings("unchecked")
-  private List<List<URI>> writeResources(final Collection<URI> toWrite, final BuildData buildData, final IResourceDescriptions oldState, final CurrentDescriptions newState, final IProgressMonitor monitor) {
+  private List<List<URI>> writeResources(final Collection<URI> toWrite, final BuildData buildData, final IResourceDescriptions oldState, final CurrentDescriptions newState, final boolean force, final IProgressMonitor monitor) {
     ResourceSet resourceSet = buildData.getResourceSet();
     IProject currentProject = getBuiltProject(buildData);
     List<URI> toBuild = Lists.newLinkedList();
@@ -836,7 +838,7 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
             final IResourceDescription copiedDescription = new FixedCopiedResourceDescription(description);
 
             final boolean hasUnresolvedLinks = resourceSet.getLoadOptions().get(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS) == Boolean.TRUE;
-            if (hasUnresolvedLinks) {
+            if (hasUnresolvedLinks && !force) {
               toRetry.add(uri);
               resourceSet.getResources().remove(resource);
             } else {
@@ -871,6 +873,9 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
             resourceSet.getResources().remove(resource);
           }
         } finally {
+          // Clear the flag
+          resourceSet.getLoadOptions().remove(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS);
+
           // Clear caches of resource
           if (resource instanceof XtextResource) {
             ((XtextResource) resource).getCache().clear(resource);
@@ -916,7 +921,7 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
        * In fact, in this case we might start processing sources before the ones they depend on are still being handled.
        */
       for (Collection<URI> fileExtensionBuildGroup : toWriteGroups) {
-        List<List<URI>> result = writeResources(fileExtensionBuildGroup, buildData, oldState, newState, subMonitor);
+        final List<List<URI>> result = writeResources(fileExtensionBuildGroup, buildData, oldState, newState, false, subMonitor);
         toBuild.addAll(result.get(0));
         tryAgain.addAll(result.get(1));
       }
@@ -926,17 +931,23 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
         // We made some progress.
         nofRetries = tryAgain.size();
         LOGGER.info(NLS.bind(Messages.MonitoredClusteringBuilderState_TRY_AGAIN, nofRetries, tryAgain));
-        List<List<URI>> result = writeResources(tryAgain, buildData, oldState, newState, subMonitor);
+        final List<List<URI>> result = writeResources(tryAgain, buildData, oldState, newState, false, subMonitor);
         toBuild.addAll(result.get(0));
         tryAgain = result.get(1);
       }
       if (!tryAgain.isEmpty()) {
-        LOGGER.warn(NLS.bind(Messages.MonitoredClusteringBuilderState_TRY_AGAIN_FAILED, nofRetries, tryAgain));
+        // We made no progress. Write the remaining resources despite their unresolved references.
+        LOGGER.info(NLS.bind(Messages.MonitoredClusteringBuilderState_TRY_AGAIN_FORCE, nofRetries, tryAgain));
+        final List<List<URI>> result = writeResources(tryAgain, buildData, oldState, newState, true, subMonitor);
+        toBuild.addAll(result.get(0));
+        tryAgain = result.get(1);
+      }
+      if (!tryAgain.isEmpty()) {
+        LOGGER.error(NLS.bind(Messages.MonitoredClusteringBuilderState_TRY_AGAIN_FAILED, nofRetries, tryAgain));
       }
     } finally {
       // Clear the flags
       BuildPhases.setIndexing(resourceSet, false);
-      resourceSet.getLoadOptions().remove(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS);
       phaseTwoBuildSorter.sort(toBuild, oldState).stream().flatMap(List::stream).forEach(buildData::queueURI);
       traceSet.ended(BuildIndexingEvent.class);
     }
