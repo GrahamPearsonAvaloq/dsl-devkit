@@ -72,7 +72,6 @@ import com.avaloq.tools.ddk.xtext.builder.tracing.ResourceValidationEvent;
 import com.avaloq.tools.ddk.xtext.extensions.AbstractResourceDescriptionsData;
 import com.avaloq.tools.ddk.xtext.extensions.IResourceDescriptionsData;
 import com.avaloq.tools.ddk.xtext.extensions.ResourceDescriptions2;
-import com.avaloq.tools.ddk.xtext.linking.ILazyLinkingResource2;
 import com.avaloq.tools.ddk.xtext.resource.AbstractCachingResourceDescriptionManager;
 import com.avaloq.tools.ddk.xtext.resource.AbstractResourceDescriptionDelta;
 import com.avaloq.tools.ddk.xtext.resource.extensions.ForwardingResourceDescriptions;
@@ -81,6 +80,7 @@ import com.avaloq.tools.ddk.xtext.resource.persistence.DirectLinkingSourceLevelU
 import com.avaloq.tools.ddk.xtext.tracing.ITraceSet;
 import com.avaloq.tools.ddk.xtext.tracing.ResourceValidationRuleSummaryEvent;
 import com.avaloq.tools.ddk.xtext.util.EmfResourceSetUtil;
+import com.avaloq.tools.ddk.xtext.util.RecordUnresolvableXrefs;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -832,17 +832,16 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
             final IResourceDescription description = manager.getResourceDescription(resource);
             // We don't care here about links, we really just want the exported objects so that we can link in the next phase.
             // Set flag to make unresolvable cross-references raise an error
-            resourceSet.getLoadOptions().put(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS, Boolean.FALSE);
-            final IResourceDescription copiedDescription = new FixedCopiedResourceDescription(description);
-
-            final boolean hasUnresolvedLinks = resourceSet.getLoadOptions().get(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS) == Boolean.TRUE;
-            if (hasUnresolvedLinks) {
-              toRetry.add(uri);
-              resourceSet.getResources().remove(resource);
-            } else {
-              final Delta intermediateDelta = manager.createDelta(oldState.getResourceDescription(uri), copiedDescription);
-              newState.register(intermediateDelta);
-              toBuild.add(uri);
+            try (final RecordUnresolvableXrefs markUnresolvableXrefs = new RecordUnresolvableXrefs(resourceSet, true)) {
+              final IResourceDescription copiedDescription = new FixedCopiedResourceDescription(description);
+              if (RecordUnresolvableXrefs.unresolvableXrefRecorded(resourceSet)) {
+                toRetry.add(uri);
+                resourceSet.getResources().remove(resource);
+              } else {
+                final Delta intermediateDelta = manager.createDelta(oldState.getResourceDescription(uri), copiedDescription);
+                newState.register(intermediateDelta);
+                toBuild.add(uri);
+              }
             }
           }
         } catch (final WrappedException ex) {
@@ -936,7 +935,6 @@ public class MonitoredClusteringBuilderState extends ClusteringBuilderState
     } finally {
       // Clear the flags
       BuildPhases.setIndexing(resourceSet, false);
-      resourceSet.getLoadOptions().remove(ILazyLinkingResource2.MARK_UNRESOLVABLE_XREFS);
       phaseTwoBuildSorter.sort(toBuild, oldState).stream().flatMap(List::stream).forEach(buildData::queueURI);
       traceSet.ended(BuildIndexingEvent.class);
     }
